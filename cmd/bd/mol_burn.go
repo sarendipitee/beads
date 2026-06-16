@@ -83,12 +83,28 @@ func burnSingleMolecule(ctx context.Context, moleculeID string, dryRun, force bo
 	// Resolve molecule ID in main store
 	resolvedID, err := utils.ResolvePartialID(ctx, store, moleculeID)
 	if err != nil {
+		// Idempotent: if the molecule is already gone, burn is a no-op success.
+		// Patrol loops call burn on the previous wisp before advancing; a missing
+		// wisp means it was already cleaned up, so there is nothing to do.
+		if isNotFoundErr(err) {
+			if !jsonOutput {
+				fmt.Fprintf(os.Stderr, "mol burn: %s not found, already burned (no-op)\n", moleculeID)
+			}
+			return
+		}
 		FatalError("resolving molecule ID %s: %v", moleculeID, err)
 	}
 
 	// Load the molecule
 	rootIssue, err := store.GetIssue(ctx, resolvedID)
 	if err != nil {
+		// Idempotent: molecule disappeared between resolve and load — already burned.
+		if isNotFoundErr(err) {
+			if !jsonOutput {
+				fmt.Fprintf(os.Stderr, "mol burn: %s not found, already burned (no-op)\n", moleculeID)
+			}
+			return
+		}
 		FatalError("loading molecule: %v", err)
 	}
 

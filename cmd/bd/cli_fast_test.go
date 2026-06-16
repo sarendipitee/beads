@@ -1487,3 +1487,64 @@ func TestCLI_WispGCExcludeType(t *testing.T) {
 		t.Errorf("Bug wisp %s should be excluded from GC via --exclude-type bug, but appeared in cleaned_ids", bugID)
 	}
 }
+
+// TestCLI_MolBurnIdempotent verifies that burning an already-gone wisp is a no-op
+// (exits 0) rather than a fatal error.  Patrol loops call `bd mol burn <prev-wisp>
+// --force` before advancing; if the wisp was already cleaned up the burn must
+// succeed silently so the loop is never stalled.
+//
+// This test must use exec.Command because FatalError calls os.Exit(1) which
+// would kill the test process if run in-process.
+func TestCLI_MolBurnIdempotent(t *testing.T) {
+	// Create a fresh db via subprocess to avoid Cobra global state pollution.
+	tmpDir := createTempDirWithCleanup(t)
+	initCmd := exec.Command(testBD, "init", "--prefix", "test", "--quiet")
+	initCmd.Dir = tmpDir
+	initCmd.Env = os.Environ()
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bd init failed: %v\n%s", err, out)
+	}
+
+	// Create an ephemeral wisp and capture its ID.
+	createCmd := exec.Command(testBD, "create", "Patrol wisp", "--ephemeral", "--type", "task", "-p", "2", "--json")
+	createCmd.Dir = tmpDir
+	createCmd.Env = os.Environ()
+	createOut, err := createCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bd create failed: %v\n%s", err, createOut)
+	}
+	var created map[string]interface{}
+	if err := json.Unmarshal(createOut, &created); err != nil {
+		t.Fatalf("failed to parse create output: %v\n%s", err, createOut)
+	}
+	wispID, _ := created["id"].(string)
+	if wispID == "" {
+		t.Fatalf("expected non-empty wisp id, got: %s", createOut)
+	}
+
+	// First burn: should succeed and delete the wisp.
+	burn1 := exec.Command(testBD, "mol", "burn", wispID, "--force")
+	burn1.Dir = tmpDir
+	burn1.Env = os.Environ()
+	if out, err := burn1.CombinedOutput(); err != nil {
+		t.Fatalf("first mol burn failed: %v\n%s", err, out)
+	}
+
+	// Second burn of the same (now-absent) ID: must exit 0 (idempotent no-op).
+	burn2 := exec.Command(testBD, "mol", "burn", wispID, "--force")
+	burn2.Dir = tmpDir
+	burn2.Env = os.Environ()
+	out2, err2 := burn2.CombinedOutput()
+	if err2 != nil {
+		t.Errorf("second mol burn of already-burned wisp should be a no-op (exit 0), got error: %v\nOutput: %s", err2, out2)
+	}
+
+	// Burn of a completely fabricated ID that was never in the store.
+	burn3 := exec.Command(testBD, "mol", "burn", "test-doesnotexist", "--force")
+	burn3.Dir = tmpDir
+	burn3.Env = os.Environ()
+	out3, err3 := burn3.CombinedOutput()
+	if err3 != nil {
+		t.Errorf("mol burn of nonexistent wisp should be a no-op (exit 0), got error: %v\nOutput: %s", err3, out3)
+	}
+}
